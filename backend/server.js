@@ -13,6 +13,7 @@ import fridayRoutes from './routes/friday.js';
 import haroldRoutes from './routes/harold.js';
 import zeusRoutes from './routes/zeus.js';
 import starkRoutes from './routes/stark.js';
+import telegramRouter from './routes/telegram.js';
 import { startReminderCron } from './middleware/reminderCron.js';
 
 dotenv.config();
@@ -33,7 +34,6 @@ export const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
-const { router: telegramRouter } = require('./routes/telegram');
 
 // ── All routes ─────────────────────────────────────────
 app.use('/api/jarvis',        jarvisRoutes);
@@ -47,7 +47,7 @@ app.use('/api/friday',        fridayRoutes);
 app.use('/api/harold',        haroldRoutes);
 app.use('/api/zeus',          zeusRoutes);
 app.use('/api/stark',         starkRoutes);
-app.use('/api/telegram', telegramRouter);
+app.use('/api/telegram',      telegramRouter);
 
 app.get('/health', (req, res) => res.json({
   status: 'Jarvis online',
