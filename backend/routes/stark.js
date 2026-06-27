@@ -225,4 +225,42 @@ Reply in English. Be concise. Address as "sir".`;
   }
 });
 
+// Add this route to backend/routes/stark.js
+// POST /api/stark/check-alerts — manual trigger from frontend
+
+router.get('/check-alerts', async (req, res) => {
+  try {
+    const { data: projects } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('user_id', 'naman')
+      .not('status', 'eq', 'Completed')
+      .not('status', 'eq', 'Cancelled')
+      .not('deadline', 'is', null);
+
+    const now = new Date();
+    const alerts = [];
+
+    for (const p of projects || []) {
+      const deadline = new Date(p.deadline);
+      const daysLeft = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
+      if (daysLeft <= 7) {
+        alerts.push({
+          id: p.id,
+          name: p.name,
+          deadline: p.deadline,
+          daysLeft,
+          progress: p.progress || 0,
+          status: p.status,
+          type: daysLeft < 0 ? 'overdue' : daysLeft === 0 ? 'today' : daysLeft === 1 ? 'tomorrow' : 'soon',
+        });
+      }
+    }
+
+    res.json({ alerts, total: alerts.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;  

@@ -15,6 +15,8 @@ import zeusRoutes from './routes/zeus.js';
 import starkRoutes from './routes/stark.js';
 import telegramRouter from './routes/telegram.js';
 import { startReminderCron } from './middleware/reminderCron.js';
+import { startZeusCron } from './middleware/zeusCron.js';
+import { startStarkAlertsCron } from './middleware/starkAlertsCron.js';
 
 dotenv.config();
 
@@ -56,7 +58,8 @@ app.get('/health', (req, res) => res.json({
 }));
 
 startReminderCron();
-
+startZeusCron();
+startStarkAlertsCron(supabase);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Jarvis backend running on port ${PORT}`);
   console.log(`All 5 agents online: JARVIS, FRIDAY, HAROLD, ZEUS, STARK`);

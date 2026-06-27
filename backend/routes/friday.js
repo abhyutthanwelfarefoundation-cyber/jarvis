@@ -1,199 +1,205 @@
+// backend/routes/friday.js — Full upgrade
 import express from 'express';
-import Groq from 'groq-sdk';
-import { tavily } from '@tavily/core';
-import { supabase } from '../db/supabase.js';
-import axios from 'axios';
-import dotenv from 'dotenv';
-dotenv.config();
+import { createClient } from '@supabase/supabase-js';
 
 const router = express.Router();
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const tvly = tavily({ apiKey: process.env.TAVILY_API_KEY });
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const TAVILY_URL = 'https://api.tavily.com/search';
 
-// ── Fetch today's news ─────────────────────────────────
-async function fetchNews(lang = 'en') {
+// ── Helper: Tavily search ──
+async function search(query, maxResults = 5) {
   try {
-    const query = lang === 'hi'
-      ? 'India aaj ki taaza khabar today'
-      : 'India top news today';
-
-    const result = await tvly.search(query, {
-      searchDepth: 'basic',
-      maxResults: 5,
-      includeAnswer: false,
+    const r = await fetch(TAVILY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: process.env.TAVILY_API_KEY,
+        query,
+        search_depth: 'advanced',
+        max_results: maxResults,
+        include_answer: true,
+      }),
     });
-
-    return result.results.slice(0, 3).map(r => ({
-      title: r.title,
-      snippet: r.content?.slice(0, 150),
-      url: r.url,
-    }));
-  } catch {
-    return [];
+    const d = await r.json();
+    return d.results?.map(r => `• ${r.title}: ${r.content?.slice(0, 200)}`).join('\n') || 'No results';
+  } catch (e) {
+    return 'Search unavailable';
   }
 }
 
-// ── Fetch weather ──────────────────────────────────────
-async function fetchWeather() {
+// ── Helper: Groq AI ──
+async function groq(prompt, system = '') {
+  const r = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.4,
+      max_tokens: 1000,
+      messages: [
+        { role: 'system', content: system || 'You are FRIDAY, a sharp business intelligence AI assistant for Naman Jain, a freelance developer and entrepreneur based in Raipur, India.' },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  });
+  const d = await r.json();
+  return d.choices?.[0]?.message?.content || 'Analysis unavailable';
+}
+
+// ── Core brief generator ──
+async function generateBrief(lang = 'en') {
+  const today = new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Kolkata' });
+  const time = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+
+  // Run all searches in parallel for speed
+  const [
+    marketRates,
+    upworkTrends,
+    techNews,
+    indianFreelance,
+    competitorRates,
+  ] = await Promise.all([
+    search('freelance web developer React Node.js rates 2026 India Upwork'),
+    search('Upwork top skills demand 2026 freelance trends'),
+    search('React Node.js AI developer news latest 2026'),
+    search('Indian freelancer market rates 2026 software development'),
+    search('freelance web development agency Raipur India rates'),
+  ]);
+
+  // Get ZEUS pipeline data
+  let pipelineContext = '';
   try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=Raipur&appid=${process.env.WEATHER_API_KEY}&units=metric`;
-    const res = await axios.get(url);
-    return {
-      temp: Math.round(res.data.main.temp),
-      feels_like: Math.round(res.data.main.feels_like),
-      description: res.data.weather[0].description,
-      humidity: res.data.main.humidity,
-      city: 'Raipur',
-    };
-  } catch {
-    return null;
+    const { data: leads } = await supabase.from('leads').select('name,stage,value').eq('user_id', 'naman').limit(10);
+    const { data: projects } = await supabase.from('projects').select('name,status,progress,deadline').eq('user_id', 'naman').limit(10);
+    const { data: tasks } = await supabase.from('tasks').select('title,due_date,completed').eq('user_id', 'naman').eq('completed', false).limit(10);
+
+    const overdue = projects?.filter(p => p.deadline && new Date(p.deadline) < new Date() && p.status !== 'Completed') || [];
+    const hotLeads = leads?.filter(l => ['Qualified', 'Proposal'].includes(l.stage)) || [];
+    const dueTasks = tasks?.filter(t => t.due_date && new Date(t.due_date) <= new Date(Date.now() + 86400000 * 2)) || [];
+
+    pipelineContext = `
+JARVIS PIPELINE STATUS:
+- Total leads: ${leads?.length || 0} | Hot leads: ${hotLeads.map(l => l.name).join(', ') || 'none'}
+- Active projects: ${projects?.filter(p => p.status === 'Active').length || 0} | Overdue: ${overdue.map(p => p.name).join(', ') || 'none'}
+- Tasks due soon: ${dueTasks.map(t => t.title).join(', ') || 'none'}`;
+  } catch (e) {
+    pipelineContext = 'Pipeline data unavailable';
   }
+
+  const langInstruction = lang === 'hi'
+    ? 'Respond in a mix of Hindi and English (Hinglish). Use Hindi for conversational parts, English for technical terms and numbers.'
+    : 'Respond in clear, concise English.';
+
+  const brief = await groq(`
+Today is ${today}, ${time} IST.
+
+MARKET INTELLIGENCE GATHERED:
+=== Freelance Market Rates ===
+${marketRates}
+
+=== Upwork Trends & In-Demand Skills ===
+${upworkTrends}
+
+=== Tech News ===
+${techNews}
+
+=== Indian Freelancer Market ===
+${indianFreelance}
+
+=== Local Competition ===
+${competitorRates}
+
+${pipelineContext}
+
+Generate FRIDAY's daily intelligence brief for Naman Jain (freelance developer, Raipur). 
+Structure it as:
+
+1. 📊 MARKET RATES TODAY
+   - What clients are paying for React/Node/AI work right now
+   - Hourly rates in USD (Upwork) and INR (Indian market)
+
+2. 🔥 OPPORTUNITIES & TRENDS  
+   - Top skills in demand right now
+   - Emerging opportunities Naman should know about
+
+3. 📰 TECH INTEL
+   - 2-3 key tech news items relevant to his work
+
+4. ⚡ PIPELINE ALERT
+   - Status of his leads and projects
+   - What needs attention today
+
+5. 🎯 TODAY'S RECOMMENDATION
+   - One specific action Naman should take today based on all intel
+
+${langInstruction}
+Keep it sharp, specific, and actionable. No fluff.
+`, `You are FRIDAY, Naman's sharp business intelligence AI. You give concise, data-driven briefings like a top-tier business analyst. Be direct and specific — no vague advice.`);
+
+  return { brief, date: today, time, generatedAt: new Date().toISOString() };
 }
 
-// ── Fetch today's tasks ────────────────────────────────
-async function fetchTodayTasks() {
-  try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+// ── Routes ──
 
-    const { data } = await supabase
-      .from('tasks')
-      .select('*')
-      .eq('user_id', 'naman')
-      .eq('completed', false)
-      .gte('scheduled_at', today.toISOString())
-      .lt('scheduled_at', tomorrow.toISOString())
-      .order('scheduled_at', { ascending: true });
-
-    return data || [];
-  } catch {
-    return [];
-  }
-}
-
-// ── Fetch memories ─────────────────────────────────────
-async function fetchMemories() {
-  try {
-    const { data } = await supabase
-      .from('memories')
-      .select('content')
-      .eq('user_id', 'naman')
-      .order('created_at', { ascending: false })
-      .limit(5);
-    return (data || []).map(m => m.content);
-  } catch {
-    return [];
-  }
-}
-
-// ── Main FRIDAY brief endpoint ─────────────────────────
+// GET brief (generates fresh one)
 router.get('/brief', async (req, res) => {
   try {
     const lang = req.query.lang || 'en';
+    const result = await generateBrief(lang);
 
-    // Fetch everything in parallel
-    const [weather, tasks, news, memories] = await Promise.all([
-      fetchWeather(),
-      fetchTodayTasks(),
-      fetchNews(lang),
-      fetchMemories(),
-    ]);
+    // Save to Supabase for history
+    try {
+      await supabase.from('friday_briefs').insert({
+        user_id: 'naman',
+        brief: result.brief,
+        date: result.date,
+        generated_at: result.generatedAt,
+      });
+    } catch (e) { /* table may not exist yet */ }
 
-    const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-    const hour = new Date().getHours();
-    const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-    const day = new Date().toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' });
+    // Send to Telegram
+    try {
+      await fetch(`${process.env.BACKEND_URL || 'http://localhost:5001'}/api/telegram/friday-brief`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brief: result.brief.slice(0, 3000) }),
+      });
+    } catch (e) { /* don't fail if telegram fails */ }
 
-    // Build brief prompt
-    const newsText = news.length > 0
-      ? news.map((n, i) => `${i + 1}. ${n.title}`).join('\n')
-      : 'No news available';
-
-    const tasksText = tasks.length > 0
-      ? tasks.map(t => `- ${t.title}${t.scheduled_at ? ` at ${new Date(t.scheduled_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}`).join('\n')
-      : 'No tasks scheduled';
-
-    const memoriesText = memories.length > 0
-      ? memories.join(', ')
-      : '';
-
-    const prompt = lang === 'hi'
-      ? `
-तुम FRIDAY हो, Naman sir की AI assistant। आज की morning brief दो।
-
-आज: ${day}, ${now}
-मौसम: ${weather ? `${weather.temp}°C, ${weather.description}, Raipur` : 'unavailable'}
-आज के tasks:
-${tasksText}
-
-आज की top news:
-${newsText}
-
-${memoriesText ? `Naman sir के बारे में: ${memoriesText}` : ''}
-
-Hindi में brief दो — warm, professional, 5-7 sentences। 
-Format:
-1. Greeting (Good morning/afternoon/evening Naman sir)
-2. आज का दिन और मौसम
-3. Tasks summary
-4. Top 2 news headlines (short)
-5. एक motivational line
-FRIDAY की तरह बोलो — "FRIDAY reporting sir"
-`
-      : `
-You are FRIDAY, Naman sir's AI assistant. Deliver today's morning brief.
-
-Today: ${day}, ${now}
-Weather: ${weather ? `${weather.temp}°C, ${weather.description}, Raipur` : 'unavailable'}
-Today's tasks:
-${tasksText}
-
-Top news today:
-${newsText}
-
-${memoriesText ? `Personal context about Naman sir: ${memoriesText}` : ''}
-
-Give the brief in English — warm, professional, 5-7 sentences.
-Format:
-1. Greeting (Good morning/afternoon/evening Naman sir)
-2. Today's date, day and weather
-3. Tasks summary
-4. Top 2 news headlines (short)
-5. One motivational line
-Speak as FRIDAY — start with "FRIDAY reporting sir,"
-`;
-
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      max_tokens: 600,
-    });
-
-    const brief = completion.choices[0].message.content;
-
-    res.json({
-      brief,
-      data: { weather, tasks, news, day, time: now },
-      language: lang,
-    });
-
-  } catch (err) {
-    console.error('FRIDAY brief error:', err.message);
-    res.status(500).json({ error: 'FRIDAY unavailable', message: err.message });
+    res.json(result);
+  } catch (e) {
+    console.error('[FRIDAY] Brief error:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
-// ── Quick news only ────────────────────────────────────
-router.get('/news', async (req, res) => {
+// GET brief history
+router.get('/history', async (req, res) => {
   try {
-    const lang = req.query.lang || 'en';
-    const news = await fetchNews(lang);
-    res.json(news);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const { data } = await supabase
+      .from('friday_briefs')
+      .select('*')
+      .eq('user_id', 'naman')
+      .order('generated_at', { ascending: false })
+      .limit(10);
+    res.json(data || []);
+  } catch (e) {
+    res.json([]);
+  }
+});
+
+// POST quick search (for manual intel queries)
+router.post('/search', async (req, res) => {
+  try {
+    const { query, lang = 'en' } = req.body;
+    const results = await search(query, 6);
+    const analysis = await groq(
+      `User query: "${query}"\n\nSearch results:\n${results}\n\nProvide a sharp, actionable analysis in 3-4 sentences. ${lang === 'hi' ? 'Respond in Hinglish.' : 'Respond in English.'}`,
+    );
+    res.json({ query, analysis, raw: results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

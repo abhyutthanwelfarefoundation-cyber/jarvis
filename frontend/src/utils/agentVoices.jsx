@@ -4,7 +4,7 @@
 
 export const AGENT_CONFIG = {
   jarvis: { rate: 0.92, pitch: 0.8,  gender: 'male'   },
-  friday: { rate: 1.05, pitch: 1.25, gender: 'female'  },
+  friday: { rate: 1.00, pitch: 1.0, gender: 'female'  },
   harold: { rate: 0.95, pitch: 0.88, gender: 'male'    },
   zeus:   { rate: 1.0,  pitch: 0.75, gender: 'male'    },
   stark:  { rate: 1.08, pitch: 1.0,  gender: 'male'    },

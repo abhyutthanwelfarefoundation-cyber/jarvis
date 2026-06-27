@@ -116,4 +116,127 @@ router.delete('/meetings/:id', async (req, res) => {
   }
 });
 
+
+// Add this to backend/routes/harold.js
+// New endpoint: POST /api/harold/extract-intel
+
+router.post('/extract-intel', async (req, res) => {
+  const { transcript, summary, title } = req.body;
+  const text = summary || transcript || '';
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.2,
+        max_tokens: 1000,
+        messages: [
+          {
+            role: 'system',
+            content: `You are an AI that extracts structured data from meeting notes.
+Extract:
+1. ACTION ITEMS — specific tasks with owner and deadline if mentioned
+2. PEOPLE/COMPANIES — anyone mentioned who could be a lead or contact
+
+Respond ONLY with valid JSON, no explanation, no markdown:
+{
+  "tasks": [
+    { "title": "task description", "due": "YYYY-MM-DD or null", "priority": "High/Medium/Low" }
+  ],
+  "leads": [
+    { "name": "Person or Company Name", "notes": "context from meeting", "stage": "New" }
+  ]
+}`
+          },
+          {
+            role: 'user',
+            content: `Meeting title: ${title}\n\nContent:\n${text}`
+          }
+        ]
+      })
+    });
+
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content || '{"tasks":[],"leads":[]}';
+
+    // Clean and parse JSON safely
+    const cleaned = raw.replace(/```json|```/g, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      parsed = { tasks: [], leads: [] };
+    }
+
+    res.json({
+      tasks: parsed.tasks || [],
+      leads: parsed.leads || [],
+    });
+  } catch (e) {
+    console.error('[HAROLD handoff] Error:', e.message);
+    res.status(500).json({ error: e.message, tasks: [], leads: [] });
+  }
+});
+
+// Add this endpoint too: POST /api/harold/approve-handoff
+// Saves approved tasks to STARK and leads to ZEUS in one call
+router.post('/approve-handoff', async (req, res) => {
+  const { tasks = [], leads = [] } = req.body;
+  const results = { tasksSaved: 0, leadsSaved: 0, errors: [] };
+
+  // Save tasks to Supabase
+  for (const task of tasks) {
+    try {
+      const { error } = await supabase.from('tasks').insert({
+        user_id: 'naman',
+        title: task.title,
+        due_date: task.due || null,
+        priority: task.priority || 'Medium',
+        completed: false,
+        source: 'harold',
+        created_at: new Date().toISOString(),
+      });
+      if (error) results.errors.push(`Task: ${error.message}`);
+      else results.tasksSaved++;
+    } catch (e) {
+      results.errors.push(`Task error: ${e.message}`);
+    }
+  }
+
+  // Save leads to Supabase
+  for (const lead of leads) {
+    try {
+      const { error } = await supabase.from('leads').insert({
+        user_id: 'naman',
+        name: lead.name,
+        notes: lead.notes || '',
+        stage: lead.stage || 'New',
+        source: 'harold',
+        created_at: new Date().toISOString(),
+      });
+      if (error) results.errors.push(`Lead: ${error.message}`);
+      else results.leadsSaved++;
+    } catch (e) {
+      results.errors.push(`Lead error: ${e.message}`);
+    }
+  }
+
+  // Telegram notification
+  try {
+    const msg = `🎙 <b>HAROLD HANDOFF COMPLETE</b>\n\n✅ ${results.tasksSaved} tasks → STARK\n⚡ ${results.leadsSaved} leads → ZEUS\n\n<i>${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</i>`;
+    await fetch(`${process.env.BACKEND_URL || 'http://localhost:5001'}/api/telegram/notify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, agent: 'HAROLD' }),
+    });
+  } catch {}
+
+  res.json(results);
+});
+
 export default router;

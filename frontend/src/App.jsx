@@ -11,6 +11,7 @@ import Research from './pages/Research';
 import Settings from './pages/Settings';
 import { useJarvis } from './hooks/useJarvis';
 import './styles/global.css';
+import InstallPrompt from './components/InstallPrompt.jsx';
 
 export default function App() {
   const jarvis = useJarvis();
@@ -40,7 +41,7 @@ export default function App() {
 
         {/* Nav — renders as sidebar on desktop, bottom bar on mobile */}
         <BottomNav />
-
+<InstallPrompt />
         {/* Page area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
           <Routes>
