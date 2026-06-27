@@ -17,6 +17,7 @@ import telegramRouter from './routes/telegram.js';
 import { startReminderCron } from './middleware/reminderCron.js';
 import { startZeusCron } from './middleware/zeusCron.js';
 import { startStarkAlertsCron } from './middleware/starkAlertsCron.js';
+import { startKeepAlive } from './middleware/keepAlive.js';
 
 dotenv.config();
 
@@ -59,6 +60,7 @@ app.get('/health', (req, res) => res.json({
 
 startReminderCron();
 startZeusCron();
+startKeepAlive();
 startStarkAlertsCron(supabase);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Jarvis backend running on port ${PORT}`);

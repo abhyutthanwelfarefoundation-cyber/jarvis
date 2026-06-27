@@ -1,273 +1,234 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+// frontend/src/hooks/useSpeech.js
+// Complete rewrite — fixes PWA mic loop, cross-device voice, wake word
 
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+import { useState, useRef, useCallback, useEffect } from 'react';
+
+// ── Voice loader (waits for voices to be ready) ──
+let voicesCache = [];
+let voicesReady = false;
+
+function loadVoices() {
+  return new Promise((resolve) => {
+    const synth = window.speechSynthesis;
+    if (!synth) return resolve([]);
+    const existing = synth.getVoices();
+    if (existing.length > 0) {
+      voicesCache = existing; voicesReady = true; return resolve(existing);
+    }
+    const handler = () => {
+      voicesCache = synth.getVoices(); voicesReady = true;
+      synth.removeEventListener('voiceschanged', handler);
+      resolve(voicesCache);
+    };
+    synth.addEventListener('voiceschanged', handler);
+    let tries = 0;
+    const poll = setInterval(() => {
+      const v = synth.getVoices();
+      if (v.length > 0 || ++tries > 20) {
+        voicesCache = v; voicesReady = true;
+        clearInterval(poll);
+        synth.removeEventListener('voiceschanged', handler);
+        resolve(v);
+      }
+    }, 200);
+  });
+}
+
+function pickVoice(voices, lang) {
+  if (!voices?.length) return null;
+  if (lang === 'hi') {
+    return voices.find(v => v.lang === 'hi-IN')
+      || voices.find(v => v.lang?.startsWith('hi'))
+      || voices.find(v => v.name?.toLowerCase().includes('hindi'))
+      || null;
+  }
+  return voices.find(v => v.lang === 'en-IN')
+    || voices.find(v => v.lang === 'en-US')
+    || voices.find(v => v.lang?.startsWith('en'))
+    || voices[0] || null;
+}
+
+// ── Global mic lock — prevents multiple instances fighting ──
+let micLocked = false;
 
 export function useSpeech({ onResult, onWakeWord, lang = 'en' }) {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [supported, setSupported] = useState(true);
 
-  const recognitionRef  = useRef(null);
-  const wakeRef         = useRef(null);
-  const wakeActiveRef   = useRef(false);
-  const wantWakeRef     = useRef(true);
-  const synthRef        = useRef(window.speechSynthesis);
-  const startTimerRef   = useRef(null);
-  const safetyTimerRef  = useRef(null);
-  const langRef         = useRef(lang);
+  const recognitionRef = useRef(null);
+  const wakeRef = useRef(null);
+  const wakeActiveRef = useRef(false);
+  const wantWakeRef = useRef(false);
+  const isMountedRef = useRef(true);
 
-  useEffect(() => { langRef.current = lang; }, [lang]);
-
-  /* ── Language detection ── */
-  const detectLang = useCallback((text) => {
-    const hi = /[\u0900-\u097F]/.test(text) ||
-      /\b(karo|kya|hai|nahi|mera|aaj|kal|batao|sun|bhai|haan|kaise|kyun|mere|liye|jarvis)\b/i.test(text);
-    return hi ? 'hi' : 'en';
-  }, []);
-
-  /* ── Speak ───────────────────────────────────────────────
-     THE KEY CHANGE: speak() now takes a 3rd argument, onEnd —
-     a callback fired from the REAL utter.onend event (true
-     completion), not a setTimeout guess. Every caller that
-     wants to know "is Jarvis done talking yet" should use this
-     instead of estimating from text.length. */
-  const speak = useCallback((text, language = 'en', onEnd) => {
-    if (!text) { onEnd?.(); return; }
-    synthRef.current?.cancel();
-
-    const clean = text
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/#{1,6}\s/g, '')
-      .replace(/[🎉🔍🌐✅❌⚠️💡🧠📱🎙️•]/g, '')
-      .replace(/\[.*?\]/g, '')
-      .replace(/```[\s\S]*?```/g, '')
-      .trim();
-    if (!clean) { onEnd?.(); return; }
-
-    const utter = new SpeechSynthesisUtterance(clean);
-    utter.lang = language === 'hi' ? 'hi-IN' : 'en-IN';
-    utter.rate = 1.05; utter.pitch = 1.0; utter.volume = 1.0;
-
-    const voices = synthRef.current?.getVoices() || [];
-    const voice = voices.find(v =>
-      language === 'hi' ? v.lang.includes('hi') : (v.lang.includes('en-IN') || v.lang.includes('en-GB') || v.lang.startsWith('en'))
-    );
-    if (voice) utter.voice = voice;
-
-    utter.onstart = () => setSpeaking(true);
-    utter.onend = () => {
-      setSpeaking(false);
-      onEnd?.(); // ← fires exactly when speech truly finishes
-
-      setTimeout(() => {
-        if (wantWakeRef.current && !recognitionRef.current) startWakeWordListener();
-      }, 600);
+  useEffect(() => {
+    isMountedRef.current = true;
+    loadVoices();
+    return () => {
+      isMountedRef.current = false;
+      stopWakeWordListener();
+      stopListening();
     };
-    utter.onerror = () => {
-      setSpeaking(false);
-      onEnd?.(); // still fire so callers never hang on error
-    };
-
-    synthRef.current?.speak(utter);
   }, []);
 
-  const stopSpeaking = useCallback(() => {
-    synthRef.current?.cancel();
-    setSpeaking(false);
-  }, []);
+  // ── SPEAK — robust, waits for voices, no interruption loops ──
+  const speak = useCallback(async (text, language = lang) => {
+    if (!text || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
 
-  /* ── Hard stop of wake-word recognizer ── */
-  const killWakeWord = useCallback(() => {
-    wantWakeRef.current = false;
-    if (wakeRef.current) {
-      try { wakeRef.current.onend = null; wakeRef.current.onerror = null; } catch {}
-      try { wakeRef.current.abort(); } catch {}
-    }
-    wakeRef.current = null;
-    wakeActiveRef.current = false;
-  }, []);
+    let voices = voicesCache;
+    if (!voicesReady || voices.length === 0) voices = await loadVoices();
 
-  /* ── One-shot mic (manual button) ── */
-  const startListening = useCallback(() => {
-    if (!SpeechRecognition) {
-      alert('Please use Chrome for voice features.');
-      return;
-    }
+    return new Promise((resolve) => {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = language === 'hi' ? 'hi-IN' : 'en-IN';
+      utter.rate = 0.95;
+      utter.volume = 1.0;
+      const voice = pickVoice(voices, language);
+      if (voice) { utter.voice = voice; utter.lang = voice.lang; }
 
-    killWakeWord();
+      if (isMountedRef.current) setSpeaking(true);
+      utter.onend = () => { if (isMountedRef.current) setSpeaking(false); resolve(); };
+      utter.onerror = () => { if (isMountedRef.current) setSpeaking(false); resolve(); };
 
-    clearTimeout(startTimerRef.current);
-    clearTimeout(safetyTimerRef.current);
+      // PWA fix: Chrome on Android sometimes needs a small delay
+      setTimeout(() => window.speechSynthesis.speak(utter), 50);
+    });
+  }, [lang]);
+
+  // ── STOP LISTENING ──
+  const stopListening = useCallback(() => {
     if (recognitionRef.current) {
-      try { recognitionRef.current.onend = null; recognitionRef.current.onerror = null; } catch {}
       try { recognitionRef.current.abort(); } catch {}
       recognitionRef.current = null;
     }
-    // Only cancel speech if something is ACTUALLY still playing.
-    // Since callers now wait for the real onEnd before calling
-    // startListening(), this should rarely have anything to cancel —
-    // but we keep it as a safety net for the manual mic button case
-    // (user taps mic while Jarvis is still mid-sentence).
-    synthRef.current?.cancel();
-    setListening(false);
-
-    startTimerRef.current = setTimeout(() => {
-      const r = new SpeechRecognition();
-      recognitionRef.current = r;
-
-      r.lang = langRef.current === 'hi' ? 'hi-IN' : 'en-IN';
-      r.interimResults = false;
-      r.maxAlternatives = 1;
-      r.continuous = false;
-
-      let gotResult = false;
-
-      r.onstart = () => {
-        setListening(true);
-        safetyTimerRef.current = setTimeout(() => {
-          try { r.stop(); } catch {}
-        }, 10000);
-      };
-
-      r.onresult = (e) => {
-        gotResult = true;
-        clearTimeout(safetyTimerRef.current);
-        const text = e.results[0][0].transcript;
-        setListening(false);
-        onResult?.(text, detectLang(text));
-      };
-
-      r.onerror = (e) => {
-        clearTimeout(safetyTimerRef.current);
-        setListening(false);
-        recognitionRef.current = null;
-        if (e.error === 'not-allowed') {
-          alert('Microphone blocked!\n\n1. Click the 🔒 lock icon in Chrome address bar\n2. Set Microphone to Allow\n3. Refresh the page');
-        }
-        wantWakeRef.current = true;
-        setTimeout(() => startWakeWordListener(), 800);
-      };
-
-      r.onend = () => {
-        clearTimeout(safetyTimerRef.current);
-        setListening(false);
-        recognitionRef.current = null;
-        if (!gotResult) {
-          wantWakeRef.current = true;
-          setTimeout(() => startWakeWordListener(), 800);
-        }
-      };
-
-      try {
-        r.start();
-      } catch (err) {
-        setListening(false);
-        recognitionRef.current = null;
-        wantWakeRef.current = true;
-        setTimeout(() => startWakeWordListener(), 800);
-      }
-    }, 300);
-  }, [onResult, detectLang, killWakeWord]);
-
-  const stopListening = useCallback(() => {
-    clearTimeout(startTimerRef.current);
-    clearTimeout(safetyTimerRef.current);
-    if (recognitionRef.current) {
-      try { recognitionRef.current.onend = null; recognitionRef.current.onerror = null; } catch {}
-      try { recognitionRef.current.stop(); } catch {}
-      recognitionRef.current = null;
-    }
-    setListening(false);
-    wantWakeRef.current = true;
-    setTimeout(() => startWakeWordListener(), 500);
+    micLocked = false;
+    if (isMountedRef.current) setListening(false);
   }, []);
 
-  /* ── Wake word (continuous background) ── */
-  const startWakeWordListener = useCallback(() => {
-    if (!SpeechRecognition) return;
-    if (wakeActiveRef.current) return;
-    if (recognitionRef.current) return;
-    if (!wantWakeRef.current) return;
+  // ── ONE-SHOT MIC (for manual mic button) ──
+  const startListening = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setSupported(false); return; }
 
-    if (wakeRef.current) {
-      try { wakeRef.current.abort(); } catch {}
-      wakeRef.current = null;
-    }
+    // Stop wake word first to release mic
+    if (wakeActiveRef.current) stopWakeWordListener();
 
-    const w = new SpeechRecognition();
-    wakeRef.current = w;
-    w.lang = 'en-IN';
-    w.continuous = true;
-    w.interimResults = true;
+    // Prevent double-start
+    if (micLocked) return;
+    micLocked = true;
 
-    w.onresult = (e) => {
-      const text = Array.from(e.results).map(r => r[0].transcript).join(' ').toLowerCase();
-      if (text.includes('jarvis')) {
-        try { w.onend = null; w.stop(); } catch {}
-        wakeRef.current = null;
-        wakeActiveRef.current = false;
-        onWakeWord?.(text);
+    const rec = new SR();
+    recognitionRef.current = rec;
+    rec.lang = lang === 'hi' ? 'hi-IN' : 'en-IN';
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => { if (isMountedRef.current) setListening(true); };
+
+    rec.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      const detected = /[\u0900-\u097F]/.test(text) ? 'hi' : 'en';
+      onResult?.(text, detected);
+    };
+
+    rec.onend = () => {
+      micLocked = false;
+      if (isMountedRef.current) setListening(false);
+      recognitionRef.current = null;
+      // Resume wake word if it was wanted
+      if (wantWakeRef.current) {
+        setTimeout(() => startWakeWordListener(), 800);
       }
     };
 
-    w.onend = () => {
-      wakeActiveRef.current = false;
-      wakeRef.current = null;
-      if (wantWakeRef.current && !recognitionRef.current) {
+    rec.onerror = (e) => {
+      micLocked = false;
+      if (isMountedRef.current) setListening(false);
+      recognitionRef.current = null;
+      if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        console.log('[Mic] Error:', e.error);
+      }
+      if (wantWakeRef.current) {
         setTimeout(() => startWakeWordListener(), 1000);
       }
     };
 
-    w.onerror = (e) => {
-      wakeActiveRef.current = false;
-      wakeRef.current = null;
-      if (e.error === 'not-allowed') return;
-      if (wantWakeRef.current && !recognitionRef.current) {
-        setTimeout(() => startWakeWordListener(), 1500);
+    try { rec.start(); } catch (e) {
+      micLocked = false;
+      if (isMountedRef.current) setListening(false);
+    }
+  }, [lang, onResult]);
+
+  // ── WAKE WORD LISTENER (continuous, background) ──
+  const startWakeWordListener = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || wakeActiveRef.current || micLocked) return;
+
+    wantWakeRef.current = true;
+    wakeActiveRef.current = true;
+
+    const wake = new SR();
+    wakeRef.current = wake;
+    wake.lang = 'en-IN';
+    wake.continuous = false; // PWA fix: use false + restart on end (more stable than true on mobile)
+    wake.interimResults = false;
+    wake.maxAlternatives = 1;
+
+    wake.onresult = (e) => {
+      const text = e.results[0][0].transcript.toLowerCase();
+      console.log('[Wake] Heard:', text);
+      if (text.includes('jarvis') || text.includes('jarvis') || text.includes('जार्विस')) {
+        onWakeWord?.();
       }
     };
 
-    try {
-      w.start();
-      wakeActiveRef.current = true;
-    } catch {
+    wake.onend = () => {
       wakeActiveRef.current = false;
+      wakeRef.current = null;
+      // Only restart if still wanted and mic not in use
+      if (wantWakeRef.current && !micLocked && isMountedRef.current) {
+        setTimeout(() => startWakeWordListener(), 500);
+      }
+    };
+
+    wake.onerror = (e) => {
+      wakeActiveRef.current = false;
+      wakeRef.current = null;
+      if (e.error === 'not-allowed') {
+        wantWakeRef.current = false; return; // permissions denied — stop trying
+      }
+      if (wantWakeRef.current && !micLocked && isMountedRef.current) {
+        setTimeout(() => startWakeWordListener(), 2000);
+      }
+    };
+
+    try { wake.start(); } catch (e) {
+      wakeActiveRef.current = false;
+      wakeRef.current = null;
     }
   }, [onWakeWord]);
 
+  // ── STOP WAKE WORD ──
   const stopWakeWordListener = useCallback(() => {
     wantWakeRef.current = false;
-    if (wakeRef.current) {
-      try { wakeRef.current.onend = null; wakeRef.current.abort(); } catch {}
-    }
-    wakeRef.current = null;
     wakeActiveRef.current = false;
+    if (wakeRef.current) {
+      try { wakeRef.current.abort(); } catch {}
+      wakeRef.current = null;
+    }
   }, []);
 
-  /* ── Voices ── */
-  useEffect(() => {
-    const load = () => synthRef.current?.getVoices();
-    load();
-    window.speechSynthesis?.addEventListener('voiceschanged', load);
-    return () => window.speechSynthesis?.removeEventListener('voiceschanged', load);
-  }, []);
-
-  /* ── Cleanup ── */
-  useEffect(() => {
-    return () => {
-      clearTimeout(startTimerRef.current);
-      clearTimeout(safetyTimerRef.current);
-      try { recognitionRef.current?.abort(); } catch {}
-      try { wakeRef.current?.abort(); } catch {}
-      synthRef.current?.cancel();
-    };
+  const detectLang = useCallback((text) => {
+    return /[\u0900-\u097F]/.test(text) ? 'hi' : 'en';
   }, []);
 
   return {
-    listening, speaking,
+    listening, speaking, supported,
     startListening, stopListening,
     startWakeWordListener, stopWakeWordListener,
-    speak, stopSpeaking, detectLang,
-    supported: !!SpeechRecognition,
+    speak, detectLang,
   };
 }

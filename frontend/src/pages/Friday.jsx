@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { agentSpeak } from '../utils/agentVoices';
+import { apiCall, getErrorMessage } from '../utils/api.js';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
 const C = '#00ff88';
@@ -120,20 +121,28 @@ export default function Friday({ jarvis }) {
   }, []);
 
   const loadHistory = async () => {
-    try { const r = await fetch(`${API_URL}/api/friday/history`); setHistory(await r.json()); } catch {}
-  };
+  try { 
+    const d = await apiCall(`/api/friday/history`);
+    setHistory(d); 
+  } catch {}
+};
 
-  const generateBrief = async () => {
-    setLoading(true); setBrief(null); setReadingIndex(-1); setIsReadingAll(false); readingRef.current = false;
-    speak(lang === 'hi' ? 'Sir, intelligence gather कर रही हूँ। एक minute।' : 'Gathering intelligence sir. One moment.');
-    try {
-      const r = await fetch(`${API_URL}/api/friday/brief?lang=${lang}`);
-      const d = await r.json();
-      if (mountedRef.current) { setBrief(d); speak(lang === 'hi' ? 'Sir, आपकी daily brief तैयार है।' : 'Sir, your daily brief is ready.'); loadHistory(); }
-    } catch { speak(lang === 'hi' ? 'Error आई सर।' : 'Failed to generate brief sir.'); }
-    finally { if (mountedRef.current) setLoading(false); }
-  };
-
+const generateBrief = async () => {
+  setLoading(true); setBrief(null); setReadingIndex(-1); setIsReadingAll(false); readingRef.current = false;
+  speak(lang === 'hi' ? 'Sir, intelligence gather कर रही हूँ। एक minute।' : 'Gathering intelligence sir. One moment.');
+  try {
+    const d = await apiCall(`/api/friday/brief?lang=${lang}`);
+    if (mountedRef.current) { 
+      setBrief(d); 
+      speak(lang === 'hi' ? 'Sir, आपकी daily brief तैयार है।' : 'Sir, your daily brief is ready.'); 
+      loadHistory(); 
+    }
+  } catch (e) { 
+    speak(getErrorMessage(e, lang));
+  } finally { 
+    if (mountedRef.current) setLoading(false); 
+  }
+};
   const speakAndWait = (text) => new Promise((resolve) => {
     window.speechSynthesis?.cancel();
     const utter = new SpeechSynthesisUtterance(text);
@@ -180,19 +189,21 @@ export default function Friday({ jarvis }) {
     }
     setIsReadingAll(false); setReadingIndex(-1); readingRef.current = false;
   };
-
-  const doSearch = async () => {
-    if (!searchQ.trim()) return;
-    setSearchLoading(true); setSearchResult(null);
-    try {
-      const r = await fetch(`${API_URL}/api/friday/search`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: searchQ, lang }),
-      });
-      const d = await r.json();
-      if (mountedRef.current) { setSearchResult(d); speak(d.analysis?.slice(0, 120)); }
-    } catch {} finally { if (mountedRef.current) setSearchLoading(false); }
-  };
+const doSearch = async () => {
+  if (!searchQ.trim()) return;
+  setSearchLoading(true); setSearchResult(null);
+  try {
+    const d = await apiCall(`/api/friday/search`, {
+      method: 'POST',
+      body: JSON.stringify({ query: searchQ, lang }),
+    });
+    if (mountedRef.current) { setSearchResult(d); speak(d.analysis?.slice(0, 120)); }
+  } catch (e) {
+    speak(getErrorMessage(e, lang));
+  } finally { 
+    if (mountedRef.current) setSearchLoading(false); 
+  }
+};
 
   const inp = { width: '100%', background: 'rgba(0,10,5,0.8)', border: `0.5px solid ${C}30`, borderRadius: 5, padding: '10px 12px', fontSize: 13, color: '#b4ffdc', fontFamily: 'Rajdhani', outline: 'none' };
 
