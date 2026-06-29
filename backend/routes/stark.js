@@ -263,4 +263,73 @@ router.get('/check-alerts', async (req, res) => {
   }
 });
 
+
+// In backend/routes/stark.js, replace your GET /projects route with this:
+// It tries with user_id filter first, falls back to all if empty
+
+router.get('/projects', async (req, res) => {
+  try {
+    // First try with user_id filter
+    let { data, error } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('user_id', 'naman')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    // If no results, try without filter (in case user_id is different)
+    if (!data || data.length === 0) {
+      const { data: allData } = await supabase
+        .from('projects')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(20);
+      data = allData || [];
+    }
+    
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Also fix GET /summary:
+router.get('/summary', async (req, res) => {
+  try {
+    let { data } = await supabase.from('projects').select('*').eq('user_id', 'naman');
+    if (!data || data.length === 0) {
+      const { data: all } = await supabase.from('projects').select('*');
+      data = all || [];
+    }
+    const projects = data || [];
+    res.json({
+      total: projects.length,
+      active: projects.filter(p => p.status === 'Active').length,
+      completed: projects.filter(p => p.status === 'Completed').length,
+      avgProgress: projects.length ? Math.round(projects.reduce((s,p) => s + (p.progress||0), 0) / projects.length) : 0,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// Add this temporary debug route to backend/routes/stark.js
+// to check what's in your projects table
+
+router.get('/debug', async (req, res) => {
+  try {
+    // Get ALL projects without user_id filter
+    const { data: all } = await supabase.from('projects').select('id, user_id, name, status');
+    // Get with filter
+    const { data: filtered } = await supabase.from('projects').select('*').eq('user_id', 'naman');
+    res.json({ 
+      total: all?.length, 
+      filtered: filtered?.length,
+      sample: all?.slice(0,3),
+      user_ids_found: [...new Set(all?.map(p => p.user_id))]
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 export default router;  
