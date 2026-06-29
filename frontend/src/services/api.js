@@ -1,17 +1,18 @@
 import axios from 'axios';
 
-// Auto-detect: if running on PC use localhost, if on phone use PC IP
+// Always use the Render backend URL from environment variable
 const getBaseURL = () => {
-  const hostname = window.location.hostname;
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return 'http://localhost:5001';
+  // In production (Vercel), use the env variable
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
   }
-  return `http://${hostname}:5001`;
+  // In local dev, use localhost
+  return 'http://localhost:5001';
 };
 
 const API = axios.create({
-  baseURL: '',  // empty = use relative URLs, Vite proxy handles it
-  timeout: 15000,
+  baseURL: getBaseURL(),
+  timeout: 30000,
 });
 
 // ── Jarvis AI ──────────────────────────────────────────────
@@ -58,7 +59,6 @@ export const addContact = (nickname, real_name, phone) =>
 export const subscribePush = (subscription) =>
   API.post('/api/notifications/subscribe', subscription).then(r => r.data);
 
-
 // ── Memories ───────────────────────────────────────────────
 export const getMemories = () =>
   API.get('/api/memories').then(r => r.data);
@@ -68,8 +68,5 @@ export const saveMemory = (content, category) =>
 
 export const deleteMemory = (id) =>
   API.delete(`/api/memories/${id}`).then(r => r.data);
-
-
-
 
 export default API;
